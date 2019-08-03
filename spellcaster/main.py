@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
 from enum import Enum
 from spellcaster.util import RepeatedTimer, get_traceback
+import time
 import json
 import os
 import subprocess
@@ -36,11 +37,11 @@ class SpellState(object):
             config = {}
 
         self.id = id
-        self.last_run = config.get('last_run', 0)
+        self.last_success = config.get('last_success', 0)
 
     def to_json(self):
         return {
-            'last_run': self.last_run,
+            'last_run': self.last_success,
         }
 
 
@@ -80,17 +81,67 @@ class Spell(object):
         self.id = config.id
         self.config = config
         self.caster = caster
-        self.status = SpellStatus.STANDBY
+        self.thread = None
+        self.process = None
+        self.status = None
+        self.change_status(SpellStatus.STANDBY)
+
+    def is_standby(self):
+        return self.status == SpellStatus.STANDBY
 
     def is_running(self):
         return self.status == SpellStatus.RUNNING
 
-    def update(self):
-        raise NotImplementedError
-        with self.caster.lock_states() as spell_states:
-            spell_states[self.id].last_run = 0
+    def is_success(self):
+        return self.status == SpellStatus.SUCCESS
 
-        self.caster.save_states()
+    def change_status(self, status):
+        if self.status == status:
+            return
+
+        self.status = status
+        self.caster.spell_status_changed(self)
+
+    def update(self):
+        if self.is_standby():
+            self.thread = threading.Thread(target=self.sentinel)
+            self.thread.start()
+
+    def sentinel(self):
+        if self.is_running():
+            return
+
+        self.change_status(SpellStatus.RUNNING)
+
+        try:
+            self.caster.print(self.caster.get_caster_dir())
+            self.process = subprocess.Popen(
+                self.config.command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=self.caster.get_caster_dir())
+
+            stdout, stderr = self.process.communicate()
+            # use with stdout.decode('utf-8') etc
+
+            # TODO
+            self.caster.print(stdout.decode('utf-8'))
+            self.caster.print(stderr.decode('utf-8'))
+
+            if self.process.returncode == 0:
+                self.change_status(SpellStatus.SUCCESS)
+                with self.caster.lock_states() as spell_states:
+                    spell_states[self.id].last_success = time.time()
+
+                self.caster.save_states()
+
+            else:
+                self.change_status(SpellStatus.ERROR)
+
+        except Exception as error:
+            self.change_status(SpellStatus.ERROR)
+            raise error
 
 
 class Caster(object):
@@ -111,9 +162,10 @@ class Caster(object):
                  config_path,
                  state_path,
                  update_interval):
-        self.print_lock.Lock = threading.Lock()
-        self.state_lock.Lock = threading.Lock()
+        self.print_lock = threading.Lock()
+        self.state_lock = threading.Lock()
         self.config_path = config_path
+        self.caster_dir = os.path.dirname(config_path)
         self.state_path = state_path
         self.caster_config = None
         self.caster_state = None
@@ -122,6 +174,9 @@ class Caster(object):
             update_interval * 60,
             self.update
         )
+
+    def get_caster_dir(self):
+        return self.caster_dir
 
     def read_config(self):
         with open(self.config_path, 'r') as config_file:
@@ -137,23 +192,36 @@ class Caster(object):
 
         self.caster_state = CasterState()
 
+    def spell_status_changed(self, spell):
+        self.print('spell {} changed to {}'.format(
+            spell.config.name, spell.status))
+
     def lock_states(self):
         return Caster.AcquireLock(self, self.state_lock)
 
     def update(self):
         try:
+            for id in list(self.spells.keys()):
+                spell = self.spells[id]
+                try:
+                    if spell.is_success():
+                        del self.spells[id]
+
+                except Exception:
+                    self.print_error()
+
             self.read_config()
             spell_states = self.caster_state.spell_states
-            for spell_config in self.caster_config.spell_configs:
+            for id in self.caster_config.spell_configs:
                 try:
-                    if spell_config.id in self.spells:
+                    if id in self.spells:
                         continue
 
-                    if spell_config.id not in spell_states:
-                        spell_states[spell_config.id] = SpellState(
-                            spell_config.id)
+                    if id not in spell_states:
+                        spell_states[id] = SpellState(id)
 
-                    self.spells[spell_config.id] = Spell(spell_config)
+                    self.spells[id] = Spell(
+                        self.caster_config.spell_configs[id], self)
 
                 except Exception:
                     self.print_error()
@@ -201,7 +269,7 @@ def main():
     parser = ArgumentParser(description='Personal automation script manager.')
     parser.add_argument('config_path', type=str,
                         help='Path to configuration file')
-    parser.add_argument('save_path', type=str,
+    parser.add_argument('state_path', type=str,
                         help='Path to saved state file')
     parser.add_argument('--update_interval', type=float, default=60,
                         help='Update interval in minutes')
