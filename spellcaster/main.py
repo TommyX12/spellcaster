@@ -1,71 +1,106 @@
+import glob
+import json
+import os
+import platform
+import subprocess
+import tempfile
+import threading
+import time
+
 from argparse import ArgumentParser
 from enum import Enum
 from spellcaster.util import RepeatedTimer, get_traceback
-import time
-import json
-import os
-import subprocess
-import threading
+
+SPELL_CONFIG_SUFFIX = '.spell.json'
+SPELL_STATE_SUFFIX = '.spell_state.json'
 
 
-class SpellConfig(object):
+def get_default_spell_state_path(config_path):
+    if config_path.endswith(SPELL_CONFIG_SUFFIX):
+        return config_path[:-len(SPELL_CONFIG_SUFFIX)] + SPELL_STATE_SUFFIX
 
-    def __init__(self, id, config):
-        self.id = id
-        self.name = config.get('name', 'Unknown')
-        self.command = config.get('command', None)
-        if self.command is None:
-            raise ValueError('Spell "{}" has no command'.format(self.name))
-
-
-class CasterConfig(object):
-
-    def __init__(self, config):
-        self.spell_configs = {}
-        spell_configs = config.get('spell_configs')
-        if spell_configs is not None:
-            self.spell_configs = {
-                id: SpellConfig(id, spell_configs[id])
-                for id in spell_configs
-            }
+    return None
 
 
 class SpellState(object):
 
-    def __init__(self, id, config=None):
+    def __init__(self, state_path, config=None):
         if config is None:
             config = {}
 
-        self.id = id
+        self.path = state_path
         self.last_success = config.get('last_success', 0)
 
     def to_json(self):
         return {
-            'last_run': self.last_success,
+            'last_success': self.last_success,
         }
 
+    def save(self):
+        with open(self.path, 'w') as f:
+            json.dump(self.to_json(), f, indent=2)
 
-class CasterState(object):
 
-    def __init__(self, config=None):
-        if config is None:
-            config = {}
+class AutoCommandConfig(object):
 
-        self.spell_states = {}
-        spell_states = config.get('spell_states')
-        if spell_states is not None:
-            self.spell_states = {
-                id: SpellState(id, spell_states[id])
-                for id in spell_states
-            }
+    def __init__(self, config, default_command):
+        self.command = config.get('command', default_command)
+        self.interval = config.get('interval', 1)
+        self.unit = config.get('unit', 'day')
 
-    def to_json(self):
-        return {
-            'spell_states': {
-                id: self.spell_states[id].to_json()
-                for id in self.spell_states
-            }
-        }
+
+class SpellConfig(object):
+
+    def __init__(self, config_path, config):
+        self.config_path = config_path
+        self.cwd = os.path.dirname(config_path)
+        self.name = config.get('name', config_path)
+        self.command = config.get('command', None)
+        self.state_path = config.get(
+            'state_path', os.path.abspath(
+                get_default_spell_state_path(config_path)))
+        if self.state_path is None:
+            raise ValueError(
+                'Spell "{}" has no state path given and cannot be deduced from spell path'.format(self.name))
+
+        self.state_path = os.path.join(self.cwd, self.state_path)
+
+        if self.command is None:
+            raise ValueError('Spell "{}" has no command'.format(self.name))
+
+        self.auto_command = AutoCommandConfig(
+            config.get('auto_command', {}), self.command)
+
+        self.spell_state = None
+        self.read_state()
+
+    def read_state(self):
+        if os.path.exists(self.state_path):
+            if not os.path.isfile(self.state_path):
+                raise ValueError('{} is not a file'.format(self.state_path))
+
+            with open(self.state_path, 'r') as state_file:
+                self.spell_state = SpellState(
+                    self.state_path, json.load(state_file))
+
+        else:
+            self.spell_state = SpellState(self.state_path)
+
+
+class CasterConfig(object):
+
+    def __init__(self, config_path, config):
+        self.spell_configs = {}
+        paths = config.get('spells', [])
+        cwd = os.path.dirname(config_path)
+        for pattern in paths:
+            spell_paths = glob.glob(os.path.join(cwd, pattern), recursive=True)
+            for spell_path in spell_paths:
+                self.read_file(os.path.realpath(spell_path))
+
+    def read_file(self, path):
+        with open(path, 'r') as f:
+            self.spell_configs[path] = SpellConfig(path, json.load(f))
 
 
 class SpellStatus(Enum):
@@ -78,7 +113,6 @@ class SpellStatus(Enum):
 class Spell(object):
 
     def __init__(self, config, caster):
-        self.id = config.id
         self.config = config
         self.caster = caster
         self.thread = None
@@ -107,6 +141,24 @@ class Spell(object):
             self.thread = threading.Thread(target=self.sentinel)
             self.thread.start()
 
+    def run_in_external_terminal(self):
+        os_type = platform.system()
+
+        if os_type == 'Darwin':
+            with self.caster.lock_tmp_write():
+                FILE_TEMPLATE = '#!/bin/bash\ncd "{}"\n{}\nread -p "Press ENTER to continue"\n'
+                TEMP_FILE = tempfile.NamedTemporaryFile().name
+                with open(TEMP_FILE, 'w') as f:
+                    f.write(FILE_TEMPLATE.format(
+                        self.config.cwd, self.config.command))
+                os.system('chmod +x "{}"'.format(TEMP_FILE))
+                os.system('open -a Terminal.app "{}"'.format(TEMP_FILE))
+
+        else:
+            # TODO: implement more OS
+            raise RuntimeError(
+                'The operating system {} is not supported yet'.format(os_type))
+
     def sentinel(self):
         if self.is_running():
             return
@@ -114,27 +166,24 @@ class Spell(object):
         self.change_status(SpellStatus.RUNNING)
 
         try:
-            self.caster.print(self.caster.get_caster_dir())
+            self.run_in_external_terminal()
+
             self.process = subprocess.Popen(
                 self.config.command,
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                cwd=self.caster.get_caster_dir())
+                cwd=self.config.cwd)
 
             stdout, stderr = self.process.communicate()
-            # use with stdout.decode('utf-8') etc
 
-            # TODO
-            self.caster.print(stdout.decode('utf-8'))
-            self.caster.print(stderr.decode('utf-8'))
+            # self.caster.print(stdout.decode('utf-8'))
+            # self.caster.print(stderr.decode('utf-8'))
 
             if self.process.returncode == 0:
                 self.change_status(SpellStatus.SUCCESS)
-                with self.caster.lock_states() as spell_states:
-                    spell_states[self.id].last_success = time.time()
-
-                self.caster.save_states()
+                self.config.spell_state.last_success = time.time()
+                self.config.spell_state.save()
 
             else:
                 self.change_status(SpellStatus.ERROR)
@@ -153,22 +202,18 @@ class Caster(object):
 
         def __enter__(self):
             self.lock.acquire()
-            return self.caster.caster_state.spell_states
 
         def __exit__(self, type, value, traceback):
             self.lock.release()
 
     def __init__(self,
                  config_path,
-                 state_path,
                  update_interval):
         self.print_lock = threading.Lock()
-        self.state_lock = threading.Lock()
-        self.config_path = config_path
+        self.tmp_write_lock = threading.Lock()
+        self.config_path = os.path.abspath(config_path)
         self.caster_dir = os.path.dirname(config_path)
-        self.state_path = state_path
         self.caster_config = None
-        self.caster_state = None
         self.spells = {}
         self.timer = RepeatedTimer(
             update_interval * 60,
@@ -180,24 +225,15 @@ class Caster(object):
 
     def read_config(self):
         with open(self.config_path, 'r') as config_file:
-            self.caster_config = CasterConfig(json.loads(config_file.read()))
-
-    def read_state(self):
-        if os.path.exists(self.state_path):
-            if not os.path.isfile(self.state_path):
-                raise ValueError('{} is not a file'.format(self.state_path))
-
-            with open(self.state_path, 'r') as state_file:
-                self.caster_state = CasterState(json.loads(state_file.read()))
-
-        self.caster_state = CasterState()
+            self.caster_config = CasterConfig(
+                self.config_path, json.load(config_file))
 
     def spell_status_changed(self, spell):
         self.print('spell {} changed to {}'.format(
             spell.config.name, spell.status))
 
-    def lock_states(self):
-        return Caster.AcquireLock(self, self.state_lock)
+    def lock_tmp_write(self):
+        return Caster.AcquireLock(self, self.tmp_write_lock)
 
     def update(self):
         try:
@@ -211,14 +247,10 @@ class Caster(object):
                     self.print_error()
 
             self.read_config()
-            spell_states = self.caster_state.spell_states
             for id in self.caster_config.spell_configs:
                 try:
                     if id in self.spells:
                         continue
-
-                    if id not in spell_states:
-                        spell_states[id] = SpellState(id)
 
                     self.spells[id] = Spell(
                         self.caster_config.spell_configs[id], self)
@@ -238,12 +270,11 @@ class Caster(object):
 
     def handle_request(self, request):
         try:
-            self.print(request)
+            raise NotImplementedError
         except Exception:
             self.print_error()
 
     def start(self):
-        self.read_state()
         self.update()
         self.timer.start()
         while True:
@@ -258,23 +289,15 @@ class Caster(object):
     def print_error(self):
         self.print(get_traceback())
 
-    def save_states(self):
-        with self.lock_states():
-            with open(self.state_path, 'w') as state_file:
-                state_file.write(json.dumps(
-                    self.caster_state.to_json(), indent=2))
-
 
 def main():
     parser = ArgumentParser(description='Personal automation script manager.')
     parser.add_argument('config_path', type=str,
                         help='Path to configuration file')
-    parser.add_argument('state_path', type=str,
-                        help='Path to saved state file')
     parser.add_argument('--update_interval', type=float, default=60,
                         help='Update interval in minutes')
     args = parser.parse_args()
-    caster = Caster(args.config_path, args.state_path, args.update_interval)
+    caster = Caster(args.config_path, args.update_interval)
     caster.start()
     return 0
 
