@@ -58,8 +58,15 @@ class SpellConfig(object):
     def __init__(self, config_path, config):
         self.config_path = config_path
         self.cwd = os.path.dirname(config_path)
-        self.name = config.get('name', config_path)
+        self.name = config.get('name', None)
+        if self.name is None:
+            raise ValueError(
+                'No name specified for spell {}'.format(config_path))
+
         self.command = config.get('command', None)
+        if self.command is None:
+            raise ValueError('Spell "{}" has no command'.format(self.name))
+
         self.state_path = config.get(
             'state_path', os.path.abspath(
                 get_default_spell_state_path(config_path)))
@@ -68,9 +75,6 @@ class SpellConfig(object):
                 'Spell "{}" has no state path given and cannot be deduced from spell path'.format(self.name))
 
         self.state_path = os.path.join(self.cwd, self.state_path)
-
-        if self.command is None:
-            raise ValueError('Spell "{}" has no command'.format(self.name))
 
         self.auto_command = AutoCommandConfig(
             config.get('auto_command', {}))
@@ -110,6 +114,7 @@ class CasterConfig(object):
 class SpellStatus(Enum):
     STANDBY = 'standby'
     RUNNING = 'running'
+    WARNING = 'warning'
     SUCCESS = 'success'
     ERROR = 'error'
 
@@ -130,8 +135,9 @@ class Spell(object):
     def is_running(self):
         return self.status == SpellStatus.RUNNING
 
-    def is_success(self):
-        return self.status == SpellStatus.SUCCESS
+    def is_finished(self):
+        return self.status == SpellStatus.SUCCESS or \
+            self.status == SpellStatus.WARNING
 
     def change_status(self, status):
         if self.status == status:
@@ -172,13 +178,11 @@ class Spell(object):
         try:
             self.process = subprocess.Popen(
                 self.config.auto_command.command,
-                # stdout=subprocess.PIPE,
-                # stderr=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 cwd=self.config.cwd)
 
-            # stdout, stderr = self.process.communicate()
+            stdout, stderr = self.process.communicate()
             self.process.wait()
 
             # # TODO
@@ -186,7 +190,10 @@ class Spell(object):
             # self.caster.print(stderr.decode('utf-8'))
 
             if self.process.returncode == 0:
-                self.change_status(SpellStatus.SUCCESS)
+                if stderr is not None and stderr.decode('utf-8').strip() != '':
+                    self.change_status(SpellStatus.WARNING)
+                else:
+                    self.change_status(SpellStatus.SUCCESS)
                 self.config.spell_state.last_success = time.time()
                 self.config.spell_state.save()
 
@@ -250,7 +257,7 @@ class Caster(object):
             for id in list(self.spells.keys()):
                 spell = self.spells[id]
                 try:
-                    if spell.is_success():
+                    if spell.is_finished():
                         del self.spells[id]
 
                 except Exception:
@@ -280,7 +287,16 @@ class Caster(object):
 
     def handle_request(self, request):
         try:
-            raise NotImplementedError
+            request = json.loads(request)
+            if request['action'] == 'cast':
+                id = request['spell_id']
+                self.print('Casting spell "{}"'.format(
+                    self.spells[id].config.name))
+                self.spells[id].run_in_external_terminal()
+
+            else:
+                raise ValueError('Unknown action')
+
         except Exception:
             self.print_error()
 
