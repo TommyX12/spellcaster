@@ -175,6 +175,13 @@ class Spell(object):
             raise RuntimeError(
                 'The operating system {} is not supported yet'.format(os_type))
 
+    def kill(self):
+        if self.process is not None:
+            self.process.kill()
+
+        else:
+            raise RuntimeError('Process is not running')
+
     def sentinel(self):
         if self.is_running():
             return
@@ -191,11 +198,14 @@ class Spell(object):
             stdout, stderr = self.process.communicate()
             self.process.wait()
 
+            process = self.process
+            self.process = None
+
             # # TODO
             # self.caster.print(stdout.decode('utf-8'))
             # self.caster.print(stderr.decode('utf-8'))
 
-            if self.process.returncode == 0:
+            if process.returncode == 0:
                 if stderr is not None and stderr.decode('utf-8').strip() != '':
                     self.change_status(SpellStatus.WARNING)
                 else:
@@ -324,6 +334,12 @@ class Caster(object):
                     self.spells[id].config.name))
                 self.rerun_spell(id)
 
+            elif action == 'kill':
+                id = request['spell_id']
+                self.print('Killing spell "{}"'.format(
+                    self.spells[id].config.name))
+                self.spells[id].kill()
+
             else:
                 raise ValueError('Unknown action')
 
@@ -350,7 +366,7 @@ def main():
     parser = ArgumentParser(description='Personal automation script manager.')
     parser.add_argument('config_path', type=str,
                         help='Path to configuration file')
-    parser.add_argument('--update_interval', type=float, default=60,
+    parser.add_argument('--update_interval', type=float, default=30,
                         help='Update interval in minutes')
     args = parser.parse_args()
     caster = Caster(args.config_path, args.update_interval)
