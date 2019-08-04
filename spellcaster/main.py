@@ -3,6 +3,7 @@ import json
 import os
 import platform
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -43,8 +44,11 @@ class SpellState(object):
 
 class AutoCommandConfig(object):
 
-    def __init__(self, config, default_command):
-        self.command = config.get('command', default_command)
+    def __init__(self, config):
+        self.command = config.get('command', None)
+        if self.command is None:
+            raise ValueError('No command specified for auto command')
+
         self.interval = config.get('interval', 1)
         self.unit = config.get('unit', 'day')
 
@@ -69,7 +73,7 @@ class SpellConfig(object):
             raise ValueError('Spell "{}" has no command'.format(self.name))
 
         self.auto_command = AutoCommandConfig(
-            config.get('auto_command', {}), self.command)
+            config.get('auto_command', {}))
 
         self.spell_state = None
         self.read_state()
@@ -104,10 +108,10 @@ class CasterConfig(object):
 
 
 class SpellStatus(Enum):
-    STANDBY = 0
-    RUNNING = 1
-    SUCCESS = 2
-    ERROR = 3
+    STANDBY = 'standby'
+    RUNNING = 'running'
+    SUCCESS = 'success'
+    ERROR = 'error'
 
 
 class Spell(object):
@@ -166,17 +170,18 @@ class Spell(object):
         self.change_status(SpellStatus.RUNNING)
 
         try:
-            self.run_in_external_terminal()
-
             self.process = subprocess.Popen(
-                self.config.command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                self.config.auto_command.command,
+                # stdout=subprocess.PIPE,
+                # stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 cwd=self.config.cwd)
 
-            stdout, stderr = self.process.communicate()
+            # stdout, stderr = self.process.communicate()
+            self.process.wait()
 
+            # # TODO
             # self.caster.print(stdout.decode('utf-8'))
             # self.caster.print(stderr.decode('utf-8'))
 
@@ -229,8 +234,13 @@ class Caster(object):
                 self.config_path, json.load(config_file))
 
     def spell_status_changed(self, spell):
-        self.print('spell {} changed to {}'.format(
-            spell.config.name, spell.status))
+        self.print('@update: {}'.format(
+            json.dumps({
+                'spell_path': spell.config.config_path,
+                'spell_name': spell.config.name,
+                'status': spell.status.value
+            })))
+        sys.stdout.flush()
 
     def lock_tmp_write(self):
         return Caster.AcquireLock(self, self.tmp_write_lock)
