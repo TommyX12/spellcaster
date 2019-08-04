@@ -102,7 +102,8 @@ class CasterConfig(object):
         paths = config.get('spells', [])
         cwd = os.path.dirname(config_path)
         for pattern in paths:
-            spell_paths = glob.glob(os.path.join(cwd, pattern), recursive=True)
+            spell_paths = glob.glob(
+                os.path.join(cwd, os.path.expanduser(pattern)), recursive=True)
             for spell_path in spell_paths:
                 self.read_file(os.path.realpath(spell_path))
 
