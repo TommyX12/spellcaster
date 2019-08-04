@@ -131,23 +131,28 @@ class Spell(object):
         self.change_status(SpellStatus.STANDBY)
 
     def is_standby(self):
-        return self.status == SpellStatus.STANDBY
+        with self.caster.lock_status():
+            return self.status == SpellStatus.STANDBY
 
     def is_running(self):
-        return self.status == SpellStatus.RUNNING
+        with self.caster.lock_status():
+            return self.status == SpellStatus.RUNNING
 
     def is_finished(self):
-        return self.status == SpellStatus.SUCCESS or \
-            self.status == SpellStatus.WARNING
+        with self.caster.lock_status():
+            return self.status == SpellStatus.SUCCESS or \
+                self.status == SpellStatus.WARNING
 
     def change_status(self, status):
-        if self.status == status:
-            return
+        with self.caster.lock_status():
+            if self.status == status:
+                return
 
-        self.status = status
+            self.status = status
+
         self.caster.spell_status_changed(self)
 
-    def update(self):
+    def update(self, force_run=False):
         if self.is_standby():
             self.thread = threading.Thread(target=self.sentinel)
             self.thread.start()
@@ -162,8 +167,8 @@ class Spell(object):
                 with open(TEMP_FILE, 'w') as f:
                     f.write(FILE_TEMPLATE.format(
                         self.config.cwd, self.config.command))
-                os.system('chmod +x "{}"'.format(TEMP_FILE))
-                os.system('open -a Terminal.app "{}"'.format(TEMP_FILE))
+                    os.system('chmod +x "{}"'.format(TEMP_FILE))
+                    os.system('open -a Terminal.app "{}"'.format(TEMP_FILE))
 
         else:
             # TODO: implement more OS
@@ -195,8 +200,8 @@ class Spell(object):
                     self.change_status(SpellStatus.WARNING)
                 else:
                     self.change_status(SpellStatus.SUCCESS)
-                self.config.spell_state.last_success = time.time()
-                self.config.spell_state.save()
+                    self.config.spell_state.last_success = time.time()
+                    self.config.spell_state.save()
 
             else:
                 self.change_status(SpellStatus.ERROR)
@@ -223,6 +228,7 @@ class Caster(object):
                  config_path,
                  update_interval):
         self.print_lock = threading.Lock()
+        self.status_lock = threading.Lock()
         self.tmp_write_lock = threading.Lock()
         self.config_path = os.path.abspath(config_path)
         self.caster_dir = os.path.dirname(config_path)
@@ -241,6 +247,19 @@ class Caster(object):
             self.caster_config = CasterConfig(
                 self.config_path, json.load(config_file))
 
+    def rerun_spell(self, spell_id):
+        if spell_id in self.spells:
+            if self.spells[spell_id].is_running():
+                raise RuntimeError('Spell "{}" is still running'.format(
+                    self.spells[spell_id].config.name))
+
+            del self.spells[spell_id]
+
+        self.caster_config.read_file(spell_id)
+        self.spells[spell_id] = Spell(
+            self.caster_config.spell_configs[spell_id], self)
+        self.spells[spell_id].update(force_run=True)
+
     def spell_status_changed(self, spell):
         self.print('@update: {}'.format(
             json.dumps({
@@ -252,6 +271,9 @@ class Caster(object):
 
     def lock_tmp_write(self):
         return Caster.AcquireLock(self, self.tmp_write_lock)
+
+    def lock_status(self):
+        return Caster.AcquireLock(self, self.status_lock)
 
     def update(self):
         try:
@@ -289,11 +311,18 @@ class Caster(object):
     def handle_request(self, request):
         try:
             request = json.loads(request)
-            if request['action'] == 'cast':
+            action = request['action']
+            if action == 'cast':
                 id = request['spell_id']
                 self.print('Casting spell "{}"'.format(
                     self.spells[id].config.name))
                 self.spells[id].run_in_external_terminal()
+
+            elif action == 'auto_cast':
+                id = request['spell_id']
+                self.print('Auto-casting spell "{}"'.format(
+                    self.spells[id].config.name))
+                self.rerun_spell(id)
 
             else:
                 raise ValueError('Unknown action')
