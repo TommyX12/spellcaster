@@ -74,7 +74,8 @@ class SpellConfig(object):
             raise ValueError(
                 'Spell "{}" has no state path given and cannot be deduced from spell path'.format(self.name))
 
-        self.state_path = os.path.join(self.cwd, self.state_path)
+        self.state_path = os.path.join(
+            self.cwd, os.path.expanduser(self.state_path))
 
         self.auto_command = AutoCommandConfig(
             config.get('auto_command', {}))
@@ -270,6 +271,20 @@ class Caster(object):
             self.caster_config.spell_configs[spell_id], self)
         self.spells[spell_id].update(force_run=True)
 
+    def manual_cast_spell(self, spell_id):
+        if spell_id in self.spells:
+            if not self.spells[spell_id].is_running():
+                del self.spells[spell_id]
+
+                self.caster_config.read_file(spell_id)
+                self.spells[spell_id] = Spell(
+                    self.caster_config.spell_configs[spell_id], self)
+
+            self.spells[spell_id].run_in_external_terminal()
+
+        else:
+            raise ValueError('Spell "{}" not found'.format(spell_id))
+
     def spell_status_changed(self, spell):
         self.print('@update: {}'.format(
             json.dumps({
@@ -326,7 +341,7 @@ class Caster(object):
                 id = request['spell_id']
                 self.print('Casting spell "{}"'.format(
                     self.spells[id].config.name))
-                self.spells[id].run_in_external_terminal()
+                self.manual_cast_spell(id)
 
             elif action == 'auto_cast':
                 id = request['spell_id']
