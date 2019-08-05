@@ -167,7 +167,7 @@ class Spell(object):
         self.caster.spell_status_changed(self)
 
     def update(self, force_run=False):
-        if self.is_standby() and (
+        if not self.is_running() and (
                 force_run or
                 (time.time() - self.config.spell_state.last_success) >=
                 self.config.auto_command.interval_seconds):
@@ -225,6 +225,8 @@ class Spell(object):
             if process.returncode == 0:
                 if stderr is not None and stderr.decode('utf-8').strip() != '':
                     self.change_status(SpellStatus.WARNING)
+                    self.config.spell_state.last_success = 0
+                    self.config.spell_state.save()
                 else:
                     self.change_status(SpellStatus.SUCCESS)
                     self.config.spell_state.last_success = time.time()
@@ -232,10 +234,15 @@ class Spell(object):
 
             else:
                 self.change_status(SpellStatus.ERROR)
+                self.config.spell_state.last_success = 0
+                self.config.spell_state.save()
 
         except Exception as error:
             self.change_status(SpellStatus.ERROR)
             raise error
+
+    def set_config(self, config):
+        self.config = config
 
 
 class Caster(object):
@@ -280,21 +287,21 @@ class Caster(object):
                 raise RuntimeError('Spell "{}" is still running'.format(
                     self.spells[spell_id].config.name))
 
-            del self.spells[spell_id]
+            self.caster_config.read_file(spell_id)
+            self.spells[spell_id].set_config(
+                self.caster_config.spell_configs[spell_id])
 
-        self.caster_config.read_file(spell_id)
-        self.spells[spell_id] = Spell(
-            self.caster_config.spell_configs[spell_id], self)
-        self.spells[spell_id].update(force_run=True)
+            self.spells[spell_id].update(force_run=True)
+
+        else:
+            raise ValueError('Spell "{}" not found'.format(spell_id))
 
     def manual_cast_spell(self, spell_id):
         if spell_id in self.spells:
             if not self.spells[spell_id].is_running():
-                del self.spells[spell_id]
-
                 self.caster_config.read_file(spell_id)
-                self.spells[spell_id] = Spell(
-                    self.caster_config.spell_configs[spell_id], self)
+                self.spells[spell_id].set_config(
+                    self.caster_config.spell_configs[spell_id])
 
             self.spells[spell_id].run_in_external_terminal()
 
@@ -318,15 +325,6 @@ class Caster(object):
 
     def update(self):
         try:
-            for id in list(self.spells.keys()):
-                spell = self.spells[id]
-                try:
-                    if spell.is_finished():
-                        del self.spells[id]
-
-                except Exception:
-                    self.print_error()
-
             self.read_config()
             for id in self.caster_config.spell_configs:
                 try:
@@ -339,10 +337,19 @@ class Caster(object):
                 except Exception:
                     self.print_error()
 
-            for id in self.spells:
+            for id in list(self.spells.keys()):
                 spell = self.spells[id]
                 try:
-                    spell.update()
+                    if spell.is_running():
+                        continue
+
+                    if id not in self.caster_config.spell_configs:
+                        del self.spells[id]
+
+                    else:
+                        spell.set_config(self.caster_config.spell_configs[id])
+                        spell.update()
+
                 except Exception:
                     self.print_error()
 
@@ -370,6 +377,10 @@ class Caster(object):
                 self.print('Killing spell "{}"'.format(
                     self.spells[id].config.name))
                 self.spells[id].kill()
+
+            elif action == 'update':
+                self.print('Running update')
+                self.update()
 
             else:
                 raise ValueError('Unknown action')
