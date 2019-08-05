@@ -44,13 +44,26 @@ class SpellState(object):
 
 class AutoCommandConfig(object):
 
+    UNIT_TO_SECONDS = {
+        'hour': 3600,
+        'minute': 60,
+        'second': 1,
+        'day': 86400,
+        'week': 604800,
+    }
+
     def __init__(self, config):
         self.command = config.get('command', None)
         if self.command is None:
             raise ValueError('No command specified for auto command')
 
         self.interval = config.get('interval', 1)
-        self.unit = config.get('unit', 'day')
+        self.unit = config.get('unit', 'hour')
+        if self.unit not in AutoCommandConfig.UNIT_TO_SECONDS:
+            raise ValueError('Invalid unit "{}" specified'.format(self.unit))
+
+        unit_to_seconds = AutoCommandConfig.UNIT_TO_SECONDS[self.unit]
+        self.interval_seconds = self.interval * unit_to_seconds
 
 
 class SpellConfig(object):
@@ -154,7 +167,10 @@ class Spell(object):
         self.caster.spell_status_changed(self)
 
     def update(self, force_run=False):
-        if self.is_standby():
+        if self.is_standby() and (
+                force_run or
+                (time.time() - self.config.spell_state.last_success) >=
+                self.config.auto_command.interval_seconds):
             self.thread = threading.Thread(target=self.sentinel)
             self.thread.start()
 
