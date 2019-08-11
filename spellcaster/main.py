@@ -323,7 +323,7 @@ class Caster(object):
     def lock_status(self):
         return Caster.AcquireLock(self, self.status_lock)
 
-    def update(self):
+    def update(self, force_run=False):
         try:
             self.read_config()
             for id in self.caster_config.spell_configs:
@@ -348,7 +348,7 @@ class Caster(object):
 
                     else:
                         spell.set_config(self.caster_config.spell_configs[id])
-                        spell.update()
+                        spell.update(force_run)
 
                 except Exception:
                     self.print_error()
@@ -379,8 +379,12 @@ class Caster(object):
                 self.spells[id].kill()
 
             elif action == 'update':
-                self.print('Running update')
-                self.update()
+                force_run = request.get('force_run', False) is True
+                if force_run:
+                    self.print('Running update (force_run=True)')
+                    self.print('Running update')
+
+                self.update(force_run)
 
             else:
                 raise ValueError('Unknown action')
