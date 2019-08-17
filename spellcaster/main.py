@@ -142,6 +142,7 @@ class Spell(object):
         self.thread = None
         self.process = None
         self.status = None
+        self.message = None
         self.change_status(SpellStatus.STANDBY)
 
     def is_standby(self):
@@ -157,14 +158,15 @@ class Spell(object):
             return self.status == SpellStatus.SUCCESS or \
                 self.status == SpellStatus.WARNING
 
-    def change_status(self, status):
+    def change_status(self, status, message=None):
         with self.caster.lock_status():
             if self.status == status:
                 return
 
             self.status = status
+            self.message = message
 
-        self.caster.spell_status_changed(self)
+        self.caster.notify_update(self)
 
     def update(self, force_run=False):
         if not self.is_running() and (
@@ -203,7 +205,7 @@ class Spell(object):
         if self.is_running():
             return
 
-        self.change_status(SpellStatus.RUNNING)
+        self.change_status(SpellStatus.RUNNING, "")
 
         try:
             self.process = subprocess.Popen(
@@ -221,24 +223,26 @@ class Spell(object):
             # # TODO
             # self.caster.print(stdout.decode('utf-8'))
             # self.caster.print(stderr.decode('utf-8'))
+            if stderr is not None:
+                stderr = stderr.decode('utf-8').strip()
 
             if process.returncode == 0:
-                if stderr is not None and stderr.decode('utf-8').strip() != '':
-                    self.change_status(SpellStatus.WARNING)
+                if stderr is not None and stderr != '':
+                    self.change_status(SpellStatus.WARNING, stderr)
                     self.config.spell_state.last_success = 0
                     self.config.spell_state.save()
                 else:
-                    self.change_status(SpellStatus.SUCCESS)
+                    self.change_status(SpellStatus.SUCCESS, "")
                     self.config.spell_state.last_success = time.time()
                     self.config.spell_state.save()
 
             else:
-                self.change_status(SpellStatus.ERROR)
+                self.change_status(SpellStatus.ERROR, stderr)
                 self.config.spell_state.last_success = 0
                 self.config.spell_state.save()
 
         except Exception as error:
-            self.change_status(SpellStatus.ERROR)
+            self.change_status(SpellStatus.ERROR, str(error))
             raise error
 
     def set_config(self, config):
@@ -308,12 +312,13 @@ class Caster(object):
         else:
             raise ValueError('Spell "{}" not found'.format(spell_id))
 
-    def spell_status_changed(self, spell):
+    def notify_update(self, spell):
         self.print('@update: {}'.format(
             json.dumps({
                 'spell_path': spell.config.config_path,
                 'spell_name': spell.config.name,
-                'status': spell.status.value
+                'status': spell.status.value,
+                'message': spell.message,
             })))
         sys.stdout.flush()
 
